@@ -9,7 +9,7 @@
 # own: a plugin is covered as soon as a marketplace lists it. Only this repo
 # holds one secret per marketplace: a fine-grained token on that marketplace
 # repo with "Contents: read and write". Without it, that marketplace is skipped
-# with a warning.
+# with a warning. 
 name: Sync marketplaces
 
 on:
