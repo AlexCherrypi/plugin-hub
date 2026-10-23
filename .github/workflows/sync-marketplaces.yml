@@ -1,0 +1,99 @@
+# Keeps the marketplaces that list these plugins current. Every 10 minutes it
+# reads each marketplace's .claude-plugin/marketplace.json, compares every
+# GitHub-sourced plugin's pinned commit with the HEAD of its repo, and where
+# one moved on commits the new pin straight to that marketplace. The commit is
+# what makes claude.ai re-sync the marketplace (its webhook fires on a push to
+# the marketplace repo, never on one to a plugin repo).
+#
+# The plugin repos and the marketplaces need no secret and no workflow of their
+# own: a plugin is covered as soon as a marketplace lists it. Only this repo
+# holds one secret per marketplace: a fine-grained token on that marketplace
+# repo with "Contents: read and write". Without it, that marketplace is skipped
+# with a warning.
+name: Sync marketplaces
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # the check
+    - cron: "23 3 * * *"     # once a day also the keepalive
+  workflow_dispatch:
+  repository_dispatch:
+    types: [plugin-updated]  # anything may ping it at once; nothing has to
+
+permissions:
+  contents: write  # the keepalive commit in this repo
+
+concurrency:
+  group: sync-marketplaces
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - marketplace: wemotion-gmbh/claude-plugins
+            secret: MARKETPLACE_DISPATCH_TOKEN
+          - marketplace: AlexCherrypi/alexcherrypi-plugins
+            secret: PERSONAL_MARKETPLACE_DISPATCH_TOKEN
+    steps:
+      - name: Pin the plugins of ${{ matrix.marketplace }} to their current HEAD
+        env:
+          TOKEN: ${{ secrets[matrix.secret] }}
+          MARKETPLACE: ${{ matrix.marketplace }}
+          FILE: .claude-plugin/marketplace.json
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::${{ matrix.secret }} not set – $MARKETPLACE is not kept current"
+            exit 0
+          fi
+          url="https://api.github.com/repos/$MARKETPLACE/contents/$FILE"
+          api() { curl -fsS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
+          got=$(api "$url")
+          blob=$(jq -r .sha <<<"$got")
+          jq -r .content <<<"$got" | base64 -d > marketplace.json
+          changes=""
+          for i in $(jq -r '.plugins | to_entries[] | select(.value.source.source? == "github") | .key' marketplace.json); do
+            repo=$(jq -r ".plugins[$i].source.repo" marketplace.json)
+            ref=$(jq -r ".plugins[$i].source.ref // \"HEAD\"" marketplace.json)
+            sha=$(git ls-remote "https://github.com/$repo" "$ref" | awk 'NR==1{print $1}' || true)
+            [ -n "$sha" ] || { echo "::warning::no commit for $repo@$ref"; continue; }
+            old=$(jq -r ".plugins[$i].source.sha // \"\"" marketplace.json)
+            if [ "$sha" != "$old" ]; then
+              jq --indent 2 ".plugins[$i].source.sha = \"$sha\"" marketplace.json > marketplace.json.tmp
+              mv marketplace.json.tmp marketplace.json
+              changes="$changes $repo@${sha:0:7}"
+            fi
+          done
+          if [ -z "$changes" ]; then
+            echo "$MARKETPLACE is current"
+            exit 0
+          fi
+          # Committed against the blob read above: if the file changed meanwhile, GitHub
+          # refuses (409) and the next run starts over from the new file.
+          jq -n --arg message "Plugin-Shas aktualisieren:$changes" --arg sha "$blob" \
+            --rawfile raw marketplace.json '{message: $message, sha: $sha, content: ($raw | @base64)}' > body.json
+          api -X PUT "$url" --data @body.json > /dev/null
+          echo "::notice::$MARKETPLACE pinned:$changes"
+
+  # GitHub turns off scheduled workflows after 60 days without activity in the
+  # repo. If nothing was committed for 30 days, commit a timestamp.
+  keepalive:
+    if: github.event.schedule == '23 3 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep the schedule alive
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 30 * 86400 )) ]; then
+            date -u +%Y-%m-%dT%H:%M:%SZ > .github/keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+            git add .github/keepalive
+            git commit -m "Keepalive"
+            git push
+          fi
