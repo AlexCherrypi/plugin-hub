@@ -59,7 +59,9 @@ jobs:
           for i in $(jq -r '.plugins | to_entries[] | select(.value.source.source? == "github") | .key' marketplace.json); do
             repo=$(jq -r ".plugins[$i].source.repo" marketplace.json)
             ref=$(jq -r ".plugins[$i].source.ref // \"HEAD\"" marketplace.json)
-            sha=$(git ls-remote "https://github.com/$repo" "$ref" | awk 'NR==1{print $1}' || true)
+            # An annotated tag lists its tag object first and the commit as "<tag>^{}";
+            # Claude Code checks the commit, so the peeled one counts where there is one.
+            sha=$(git ls-remote "https://github.com/$repo" "$ref" "$ref^{}" | awk '{ if ($2 ~ /\^\{\}$/) peeled=$1; else if (first=="") first=$1 } END { print (peeled != "" ? peeled : first) }' || true)
             [ -n "$sha" ] || { echo "::warning::no commit for $repo@$ref"; continue; }
             old=$(jq -r ".plugins[$i].source.sha // \"\"" marketplace.json)
             if [ "$sha" != "$old" ]; then
