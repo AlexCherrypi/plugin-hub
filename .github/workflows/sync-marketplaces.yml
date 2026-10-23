@@ -14,7 +14,7 @@ name: Sync marketplaces
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # the check
+    - cron: "4-59/10 * * * *"  # the check, off the full hour (GitHub drops or delays runs there)
     - cron: "23 3 * * *"     # once a day also the keepalive
   workflow_dispatch:
   repository_dispatch:
